@@ -1,0 +1,17 @@
+const WORDS=[['你','nǐ'],['你好','nǐ hǎo'],['零','líng'],['二','èr'],['八','bā'],['好','hǎo'],['您','nín'],['一','yī'],['五','wǔ'],['你们','nǐmen'],['早上','zǎoshang'],['是','shì'],['国','guó'],['我','wǒ'],['哪','nǎ'],['人','rén'],['呢','ne']];
+const json=(status,data)=>({statusCode:status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'},body:JSON.stringify(data)});
+exports.handler=async(event)=>{
+ if(event.httpMethod!=='POST')return json(405,{error:'POST only'});
+ if(!process.env.OPENAI_API_KEY)return json(503,{error:'ยังไม่ได้ตั้งค่า OPENAI_API_KEY ใน Netlify'});
+ try{
+  const req=JSON.parse(event.body||'{}'); const i=Number(req.index);if(!Number.isInteger(i)||i<0||i>=WORDS.length)return json(400,{error:'คำศัพท์ไม่ถูกต้อง'});
+  const audio=req.audio; if(typeof audio!=='string'||!/^data:audio\/(webm|wav|mp4|mpeg|ogg);base64,[A-Za-z0-9+/=]+$/.test(audio)||audio.length>9500000)return json(400,{error:'ไฟล์เสียงไม่รองรับหรือใหญ่เกินไป (สูงสุดประมาณ 7 MB)'});
+  const [word,pinyin]=WORDS[i]; const payload={model:process.env.OPENAI_AUDIO_MODEL||'gpt-4o-audio-preview',temperature:0.1,max_tokens:650,response_format:{type:'json_object'},messages:[{role:'system',content:'คุณเป็นครูภาษาจีนกลางสำหรับนักศึกษาไทยปี 1 ฟังไฟล์เสียงจริงและประเมินอย่างระมัดระวัง ตอบ JSON เท่านั้น ฟิลด์ initial,final,tone เป็นคะแนน 0,0.5,1 หรือ null หากเสียงไม่ชัดพอ; feedback เป็นภาษาไทยสั้นๆ; heard เป็นสิ่งที่ได้ยิน (ถ้าไม่แน่ใจบอกไม่แน่ใจ); confidence เป็น low,medium,high. ให้คะแนนพยัญชนะ สระ วรรณยุกต์แยกกันตามสิ่งที่ฟัง หากไม่มั่นใจโดยเฉพาะวรรณยุกต์ ให้ null ห้ามเดาคะแนนหรือกล่าวอ้างว่าตรวจได้แม่นยำเชิงอะคูสติก การออกเสียงในคำต่อเนื่องอาจมี tone sandhi. คะแนนเป็นเพียงการประเมินเบื้องต้น ไม่ใช่การตรวจสอบเชิงสัทศาสตร์ที่ผ่านการรับรอง.'},{role:'user',content:[{type:'text',text:`ประเมินการอ่านคำว่า ${word} (${pinyin}) ตาม rubric: พยัญชนะ 0/0.5/1, สระ 0/0.5/1, วรรณยุกต์ 0/0.5/1. ต้องแนะนำการแก้ไขเป็นภาษาไทยและพิจารณาความชัดของเสียง ตอบ JSON object เท่านั้น`},{type:'input_audio',input_audio:{data:audio.split(',')[1],format:audio.includes('webm')?'webm':audio.includes('wav')?'wav':audio.includes('mp4')?'mp3':audio.includes('mpeg')?'mp3':'ogg'}}]}]};
+  const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),24000);
+  let r;try{r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{Authorization:`Bearer ${process.env.OPENAI_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});}finally{clearTimeout(timeout)}
+  const data=await r.json();if(!r.ok)return json(502,{error:'OpenAI API ไม่สำเร็จ',detail:data.error?.message||`HTTP ${r.status}`});
+  let result;try{result=JSON.parse(data.choices[0].message.content)}catch{return json(502,{error:'AI ส่งผลลัพธ์ไม่อยู่ในรูปแบบที่กำหนด'})}
+  const score=v=>[0,0.5,1].includes(v)?v:null;const initial=score(result.initial),final=score(result.final),tone=score(result.tone);
+  return json(200,{index:i,word,pinyin,initial,final,tone,raw:[initial,final,tone].every(v=>v!==null)?initial+final+tone:null,feedback:String(result.feedback||'').slice(0,700),heard:String(result.heard||'').slice(0,120),confidence:['low','medium','high'].includes(result.confidence)?result.confidence:'low',provisional:true});
+ }catch(e){return json(500,{error:e.name==='AbortError'?'การประเมินใช้เวลานานเกินไป กรุณาลองใหม่':'ไม่สามารถประมวลผลเสียงได้',detail:String(e.message||'').slice(0,180)})}
+};
